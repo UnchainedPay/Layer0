@@ -15,9 +15,9 @@ const senderAbi = [
   "event PacketSent(uint256 indexed dstChainId, uint256 indexed seq, address indexed sender, address receiver, bytes payload, bytes32 commitment)"
 ];
 
-// NOTE: tuple components are unnamed => must pass array (positional) to ethers v6
+// ✅ IMPORTANT: tuple components MUST be named if we want to pass an object in ethers v6
 const receiverAbi = [
-  "function recvPacket((uint256,uint256,uint256,address,address,bytes,bytes32,uint256) p, bytes hubAttestation)"
+  "function recvPacket((uint256 srcChainId,uint256 dstChainId,uint256 srcSeq,address sender,address receiver,bytes payload,bytes32 commitment,uint256 hubSeq) p, bytes hubAttestation)"
 ];
 
 type Addrs = {
@@ -30,31 +30,23 @@ function ensureStateDir() {
 }
 
 function deployOn(network: "chaina" | "chainb") {
-  const out = execSync(`npx hardhat run scripts/deploy.ts --network ${network}`, {
-    stdio: "pipe",
-  }).toString();
-
+  const out = execSync(`npx hardhat run scripts/deploy.ts --network ${network}`, { stdio: "pipe" }).toString();
   const sender = /PacketSender:\s*(0x[a-fA-F0-9]{40})/.exec(out)?.[1];
   const receiver = /PacketReceiver:\s*(0x[a-fA-F0-9]{40})/.exec(out)?.[1];
   const chainId = /chainId:\s*(\d+)/.exec(out)?.[1];
-
   if (!sender || !receiver || !chainId) throw new Error("Deploy parse failed:\n" + out);
   return { chainId: Number(chainId), PacketSender: sender, PacketReceiver: receiver };
 }
 
-async function sleep(ms: number) {
-  await new Promise((r) => setTimeout(r, ms));
-}
-
-async function waitRpc(url: string, name: string) {
-  const p = new ethers.JsonRpcProvider(url);
-  for (;;) {
+async function waitForRpc(url: string, label: string) {
+  const provider = new ethers.JsonRpcProvider(url);
+  while (true) {
     try {
-      await p.getBlockNumber();
+      await provider.getBlockNumber();
       return;
     } catch {
-      console.log(`[relayer] waiting ${name}...`);
-      await sleep(1000);
+      console.log(`[relayer] waiting ${label}...`);
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 }
@@ -62,13 +54,13 @@ async function waitRpc(url: string, name: string) {
 async function main() {
   ensureStateDir();
 
-  // Wait RPC endpoints (compose depends_on doesn't guarantee "ready")
-  await waitRpc(CHAINA_RPC, "chaina");
-  await waitRpc(CHAINB_RPC, "chainb");
+  // wait RPCs (docker startup race)
+  await waitForRpc(CHAINA_RPC, "chaina");
+  await waitForRpc(CHAINB_RPC, "chainb");
 
   const addrs: Addrs = {
     chaina: deployOn("chaina"),
-    chainb: deployOn("chainb"),
+    chainb: deployOn("chainb")
   };
   fs.writeFileSync(ADDR_FILE, JSON.stringify(addrs, null, 2));
   console.log("[relayer] deployed:", addrs);
@@ -84,84 +76,66 @@ async function main() {
 
   console.log("[relayer] watching ChainA PacketSent...");
 
-  senderA.on(
-    "PacketSent",
-    async (_dstChainId, seq, sender, receiver, payload, commitment, ev) => {
-      try {
-        const txHash = ev.log.transactionHash;
+  senderA.on("PacketSent", async (_dstChainId, seq, sender, receiver, payload, commitment, ev) => {
+    try {
+      const txHash = ev.log.transactionHash;
 
-        const receipt = await providerA.getTransactionReceipt(txHash);
-        if (!receipt) throw new Error(`receipt null for ${txHash}`);
+      const receipt = await providerA.getTransactionReceipt(txHash);
+      if (!receipt) throw new Error("missing receipt");
 
-        const block = await providerA.getBlock(receipt.blockNumber);
-        if (!block) throw new Error(`block null for ${receipt.blockNumber}`);
+      const block = await providerA.getBlock(receipt.blockNumber);
+      if (!block) throw new Error("missing block");
 
-        const packet = {
-          srcChainId: String(addrs.chaina.chainId),
-          dstChainId: String(addrs.chainb.chainId),
-          srcSeq: Number(seq),
-          sender: String(sender),
-          receiver: String(receiver),
-          payloadHex: ethers.hexlify(payload),
-          commitment: String(commitment),
-          proof: {
-            txHash,
-            blockNumber: receipt.blockNumber,
-            blockHash: receipt.blockHash,
-            header: {
-              number: block.number,
-              hash: block.hash,
-              parentHash: block.parentHash,
-              timestamp: block.timestamp,
-            },
-          },
-        };
+      const packet = {
+        srcChainId: String(addrs.chaina.chainId),
+        dstChainId: String(addrs.chainb.chainId),
+        srcSeq: Number(seq),
+        sender: String(sender),
+        receiver: String(receiver),
+        payloadHex: ethers.hexlify(payload),
+        commitment: String(commitment),
+        proof: {
+          txHash,
+          blockNumber: receipt.blockNumber,
+          blockHash: receipt.blockHash,
+          header: { number: block.number, hash: block.hash, parentHash: block.parentHash, timestamp: block.timestamp }
+        }
+      };
 
-        const submit = await axios.post(`${HUB_URL}/submit`, packet, { timeout: 10_000 });
-        const hubSeq = submit.data.hubSeq as number;
-        console.log("[relayer] hubSeq:", hubSeq);
+      const submit = await axios.post(`${HUB_URL}/submit`, packet, { timeout: 10_000 });
+      const hubSeq = submit.data.hubSeq as number;
+      console.log("[relayer] hubSeq:", hubSeq);
 
-        // hub attestation placeholder: signerA signs packet digest (EIP-191)
-        const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-          ["uint256", "uint256", "uint256", "address", "address", "bytes", "bytes32", "uint256"],
-          [
-            addrs.chaina.chainId,
-            addrs.chainb.chainId,
-            Number(seq),
-            sender,
-            receiver,
-            payload,
-            commitment,
-            hubSeq,
-          ]
-        );
-        const sig = await signerA.signMessage(ethers.getBytes(ethers.keccak256(encoded)));
+      // hub attestation placeholder: signerA signs packet digest (EIP-191)
+      const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint256","uint256","uint256","address","address","bytes","bytes32","uint256"],
+        [addrs.chaina.chainId, addrs.chainb.chainId, Number(seq), sender, receiver, payload, commitment, hubSeq]
+      );
+      const sig = await signerA.signMessage(ethers.getBytes(ethers.keccak256(encoded)));
 
-        // IMPORTANT: tuple components are unnamed in ABI -> pass positional array
-        const pTuple = [
-          addrs.chaina.chainId,
-          addrs.chainb.chainId,
-          Number(seq),
-          sender,
-          receiver,
-          payload,
-          commitment,
-          hubSeq,
-        ] as const;
+      // ✅ Now ABI tuple fields are named => object is accepted by ethers v6
+      const pStruct = {
+        srcChainId: addrs.chaina.chainId,
+        dstChainId: addrs.chainb.chainId,
+        srcSeq: Number(seq),
+        sender: String(sender),
+        receiver: String(receiver),
+        payload: payload,
+        commitment: String(commitment),
+        hubSeq: hubSeq
+      };
 
-        const tx = await receiverB.recvPacket(pTuple, sig);
-        await tx.wait();
+      const tx = await receiverB.recvPacket(pStruct, sig);
+      await tx.wait();
 
-        await axios.post(`${HUB_URL}/markDelivered`, { hubSeq }, { timeout: 10_000 });
-        console.log("[relayer] delivered:", tx.hash);
-      } catch (e: any) {
-        console.error("[relayer] error:", e?.message || e);
-      }
+      await axios.post(`${HUB_URL}/markDelivered`, { hubSeq }, { timeout: 10_000 });
+      console.log("[relayer] delivered:", tx.hash);
+    } catch (e: any) {
+      console.error("[relayer] error:", e?.message || e);
     }
-  );
+  });
 
-  // Keep process alive
-  for (;;) await sleep(60_000);
+  while (true) await new Promise((r) => setTimeout(r, 60_000));
 }
 
 main().catch((e) => {
