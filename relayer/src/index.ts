@@ -15,7 +15,7 @@ const senderAbi = [
   "event PacketSent(uint256 indexed dstChainId, uint256 indexed seq, address indexed sender, address receiver, bytes payload, bytes32 commitment)"
 ];
 
-// ✅ IMPORTANT: tuple components MUST be named if we want to pass an object in ethers v6
+// ✅ IMPORTANT: tuple avec des noms => on peut passer un objet en ethers v6
 const receiverAbi = [
   "function recvPacket((uint256 srcChainId,uint256 dstChainId,uint256 srcSeq,address sender,address receiver,bytes payload,bytes32 commitment,uint256 hubSeq) p, bytes hubAttestation)"
 ];
@@ -29,6 +29,19 @@ function ensureStateDir() {
   if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
 }
 
+async function waitRpc(url: string, name: string) {
+  const provider = new ethers.JsonRpcProvider(url);
+  for (;;) {
+    try {
+      await provider.getBlockNumber();
+      return;
+    } catch {
+      console.log(`[relayer] waiting ${name}...`);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
 function deployOn(network: "chaina" | "chainb") {
   const out = execSync(`npx hardhat run scripts/deploy.ts --network ${network}`, { stdio: "pipe" }).toString();
   const sender = /PacketSender:\s*(0x[a-fA-F0-9]{40})/.exec(out)?.[1];
@@ -38,25 +51,12 @@ function deployOn(network: "chaina" | "chainb") {
   return { chainId: Number(chainId), PacketSender: sender, PacketReceiver: receiver };
 }
 
-async function waitForRpc(url: string, label: string) {
-  const provider = new ethers.JsonRpcProvider(url);
-  while (true) {
-    try {
-      await provider.getBlockNumber();
-      return;
-    } catch {
-      console.log(`[relayer] waiting ${label}...`);
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-}
-
 async function main() {
   ensureStateDir();
 
-  // wait RPCs (docker startup race)
-  await waitForRpc(CHAINA_RPC, "chaina");
-  await waitForRpc(CHAINB_RPC, "chainb");
+  // ✅ attendre que les 2 RPC répondent vraiment
+  await waitRpc(CHAINA_RPC, "chaina");
+  await waitRpc(CHAINB_RPC, "chainb");
 
   const addrs: Addrs = {
     chaina: deployOn("chaina"),
@@ -81,10 +81,10 @@ async function main() {
       const txHash = ev.log.transactionHash;
 
       const receipt = await providerA.getTransactionReceipt(txHash);
-      if (!receipt) throw new Error("missing receipt");
+      if (!receipt) throw new Error("tx receipt is null");
 
       const block = await providerA.getBlock(receipt.blockNumber);
-      if (!block) throw new Error("missing block");
+      if (!block) throw new Error("block is null");
 
       const packet = {
         srcChainId: String(addrs.chaina.chainId),
@@ -102,9 +102,19 @@ async function main() {
         }
       };
 
-      const submit = await axios.post(`${HUB_URL}/submit`, packet, { timeout: 10_000 });
-      const hubSeq = submit.data.hubSeq as number;
-      console.log("[relayer] hubSeq:", hubSeq);
+      let hubSeq: number;
+      try {
+        const submit = await axios.post(`${HUB_URL}/submit`, packet, { timeout: 10_000 });
+        hubSeq = submit.data.hubSeq as number;
+        console.log("[relayer] hubSeq:", hubSeq);
+      } catch (e: any) {
+        // ✅ 409 = déjà soumis / conflit => on log et on stop là
+        if (e?.response?.status === 409) {
+          console.log("[relayer] hub submit 409 (duplicate/conflict) – skipping");
+          return;
+        }
+        throw e;
+      }
 
       // hub attestation placeholder: signerA signs packet digest (EIP-191)
       const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -113,16 +123,15 @@ async function main() {
       );
       const sig = await signerA.signMessage(ethers.getBytes(ethers.keccak256(encoded)));
 
-      // ✅ Now ABI tuple fields are named => object is accepted by ethers v6
       const pStruct = {
         srcChainId: addrs.chaina.chainId,
         dstChainId: addrs.chainb.chainId,
         srcSeq: Number(seq),
-        sender: String(sender),
-        receiver: String(receiver),
-        payload: payload,
-        commitment: String(commitment),
-        hubSeq: hubSeq
+        sender,
+        receiver,
+        payload,
+        commitment,
+        hubSeq
       };
 
       const tx = await receiverB.recvPacket(pStruct, sig);
@@ -131,7 +140,7 @@ async function main() {
       await axios.post(`${HUB_URL}/markDelivered`, { hubSeq }, { timeout: 10_000 });
       console.log("[relayer] delivered:", tx.hash);
     } catch (e: any) {
-      console.error("[relayer] error:", e?.message || e);
+      console.error("[relayer] error:", e?.response?.data || e?.message || e);
     }
   });
 
