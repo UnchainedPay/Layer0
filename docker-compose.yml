@@ -1,0 +1,34 @@
+services:
+  chaina:
+    image: ghcr.io/foundry-rs/foundry:latest
+    command: ["anvil","--host","0.0.0.0","--port","8545","--chain-id","31337","--block-time","2"]
+    ports: ["8545:8545"]
+
+  chainb:
+    image: ghcr.io/foundry-rs/foundry:latest
+    command: ["anvil","--host","0.0.0.0","--port","9545","--chain-id","31338","--block-time","2"]
+    ports: ["9545:9545"]
+
+  hub:
+    build: ./node
+    environment:
+      - HUB_PORT=7000
+      - HUB_DB=/data/hub.sqlite
+    volumes:
+      - hubdata:/data
+    ports: ["7000:7000"]
+    depends_on: [chaina, chainb]
+
+  relayer:
+    build: ./relayer
+    environment:
+      - CHAINA_RPC=http://chaina:8545
+      - CHAINB_RPC=http://chainb:9545
+      - HUB_URL=http://hub:7000
+      # Anvil default private key (account #0) for local testing:
+      - DEPLOYER_PRIVATE_KEY=0x59c6995e998f97a5a0044966f094538b2926f1d2f9e5f5b0d5d7c1d8e5c3b5c6
+    depends_on: [hub]
+    command: ["node","dist/index.js"]
+
+volumes:
+  hubdata:
