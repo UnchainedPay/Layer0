@@ -3,8 +3,8 @@ import axios from "axios";
 import { execSync } from "child_process";
 import fs from "fs";
 
-const CHAINA_RPC = process.env.CHAINA_RPC!;
-const CHAINB_RPC = process.env.CHAINB_RPC!;
+const CHAINA_RPC = process.env.CHAINA_RPC || "http://chaina:8545";
+const CHAINB_RPC = process.env.CHAINB_RPC || "http://chainb:8545";
 const HUB_URL = process.env.HUB_URL!;
 const PK = process.env.DEPLOYER_PRIVATE_KEY!;
 
