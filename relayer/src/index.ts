@@ -61,8 +61,18 @@ async function main() {
   senderA.on("PacketSent", async (_dstChainId, seq, sender, receiver, payload, commitment, ev) => {
     try {
       const txHash = ev.log.transactionHash;
+
       const receipt = await providerA.getTransactionReceipt(txHash);
+      if (!receipt) {
+        console.warn("[relayer] tx receipt is null (not indexed yet?)", txHash);
+        return;
+      }
+
       const block = await providerA.getBlock(receipt.blockNumber);
+      if (!block) {
+        console.warn("[relayer] block is null", receipt.blockNumber, txHash);
+        return;
+      }
 
       const packet = {
         srcChainId: String(addrs.chaina.chainId),
@@ -103,7 +113,12 @@ async function main() {
       };
 
       const tx = await receiverB.recvPacket(pStruct, sig);
-      await tx.wait();
+
+      const deliverReceipt = await tx.wait();
+      if (!deliverReceipt) {
+        console.warn("[relayer] deliver tx.wait() returned null receipt", tx.hash);
+        return;
+      }
 
       await axios.post(`${HUB_URL}/markDelivered`, { hubSeq }, { timeout: 10_000 });
       console.log("[relayer] delivered:", tx.hash);
