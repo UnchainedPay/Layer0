@@ -1,0 +1,98 @@
+services:
+  # ABCI apps (one per node)
+  app0:
+    build: ./app
+    environment:
+      - APP_ID=app0
+      - APP_HOME=/data
+      - APP_SNAPSHOT=/data/state.json
+    volumes:
+      - ./devnet/node0/app:/data
+    ports:
+      - "27158:27158" # app0 ABCI tcp
+
+  app1:
+    build: ./app
+    environment:
+      - APP_ID=app1
+      - APP_HOME=/data
+      - APP_SNAPSHOT=/data/state.json
+    volumes:
+      - ./devnet/node1/app:/data
+    ports:
+      - "27258:27158"
+
+  app2:
+    build: ./app
+    environment:
+      - APP_ID=app2
+      - APP_HOME=/data
+      - APP_SNAPSHOT=/data/state.json
+    volumes:
+      - ./devnet/node2/app:/data
+    ports:
+      - "27358:27158"
+
+  app3:
+    build: ./app
+    environment:
+      - APP_ID=app3
+      - APP_HOME=/data
+      - APP_SNAPSHOT=/data/state.json
+    volumes:
+      - ./devnet/node3/app:/data
+    ports:
+      - "27458:27158"
+
+  # CometBFT nodes
+  node0:
+    image: ghcr.io/cometbft/cometbft:v0.38.10
+    command:
+      - node
+      - --home=/comet
+      - --proxy_app=tcp://app0:27158
+    volumes:
+      - ./devnet/node0/comet:/comet
+    ports:
+      - "26656:26656"
+      - "26657:26657"
+    depends_on: [app0]
+
+  node1:
+    image: ghcr.io/cometbft/cometbft:v0.38.10
+    command:
+      - node
+      - --home=/comet
+      - --proxy_app=tcp://app1:27158
+    volumes:
+      - ./devnet/node1/comet:/comet
+    ports:
+      - "26666:26656"
+      - "26667:26657"
+    depends_on: [app1]
+
+  node2:
+    image: ghcr.io/cometbft/cometbft:v0.38.10
+    command:
+      - node
+      - --home=/comet
+      - --proxy_app=tcp://app2:27158
+    volumes:
+      - ./devnet/node2/comet:/comet
+    ports:
+      - "26676:26656"
+      - "26677:26657"
+    depends_on: [app2]
+
+  node3:
+    image: ghcr.io/cometbft/cometbft:v0.38.10
+    command:
+      - node
+      - --home=/comet
+      - --proxy_app=tcp://app3:27158
+    volumes:
+      - ./devnet/node3/comet:/comet
+    ports:
+      - "26686:26656"
+      - "26687:26657"
+    depends_on: [app3]

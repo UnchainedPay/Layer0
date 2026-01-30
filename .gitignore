@@ -1,0 +1,15 @@
+# Node
+node_modules/
+**/node_modules/
+
+# Env
+.env
+
+# Temp / patches
+*.patch
+
+# Random
+send.js
+{
+
+node/package-lock.json
